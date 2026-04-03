@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>X200 G35 COMPILER</title>
+    <style>
+        :root { --red: #ff3333; --black: #000; --gray: #1a1a1a; }
+        body { background: var(--black); color: var(--red); font-family: monospace; margin: 0; overflow: hidden; height: 100vh; }
+        
+        /* VIDEO DISPLAY (THE BONUS) */
+        #monitor { height: 35vh; background: #050000; border-bottom: 2px solid var(--red); position: relative; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+
+        /* THE COMPILER TRACKS */
+        #studio { height: 40vh; overflow-x: scroll; position: relative; background: #080000; border-bottom: 2px solid var(--red); touch-action: pan-x; }
+        .track-lane { height: 50%; width: 12000px; border-bottom: 1px solid #222; position: relative; }
+        
+        /* THE PLAYHEAD & GUTTER HANDLE */
+        #playhead { position: absolute; top: 0; width: 2px; background: #fff; height: 100%; z-index: 100; pointer-events: none; }
+        #scrub-handle { position: absolute; top: 35vh; width: 80px; height: 40vh; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); z-index: 105; transform: translateX(-40px); }
+
+        .clip { position: absolute; height: 80%; top: 10%; background: rgba(255,0,0,0.4); border: 1px solid var(--red); z-index: 50; }
+        canvas { width: 100%; height: 100%; pointer-events: none; }
+
+        /* G35 NAVIGATION PAD */
+        #controls { height: 25vh; display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; padding: 10px 10px 80px 10px; background: var(--black); }
+        .btn { background: var(--gray); color: var(--red); border: 1px solid #444; font-weight: bold; font-size: 11px; }
+        .btn:active { background: var(--red); color: #000; }
+    </style>
+</head>
+<body>
+
+<div id="monitor">
+    <video id="v-out" playsinline></video>
+</div>
+
+<div id="studio">
+    <div id="playhead"></div>
+    <div id="scrub-handle" ontouchmove="manualScrub(event)"></div>
+    <div class="track-lane" id="lane-1" onclick="focusLane(1)"></div>
+    <div class="track-lane" id="lane-2" onclick="focusLane(2)"></div>
+</div>
+
+<div id="controls">
+    <button class="btn" onclick="document.getElementById('upload').click()">LOAD CLIP</button>
+    <button class="btn" onclick="playPause()">PLAY/STP</button>
+    <button class="btn" onclick="slamNext()" style="color:#fff; background:#400;">SLAM LINK</button>
+    <button class="btn" onclick="exportSong()" style="color:#0f0;">EXPORT 5M</button>
+    <button class="btn" onclick="location.reload()">NEW SONG</button>
+</div>
+
+<input type="file" id="upload" hidden multiple onchange="importAudio(event)">
+
+<script>
+    const actx = new (window.AudioContext || window.webkitAudioContext)();
+    const zoom = 40; // Pixels per second
+    let state = { playing: false, time: 0, start: 0, l1: null, l2: null };
+    let masterLibrary = [];
+
+    async function importAudio(e) {
+        for (let file of e.target.files) {
+            const buffer = await actx.decodeAudioData(await file.arrayBuffer());
+            const url = URL.createObjectURL(file);
+            masterLibrary.push({ name: file.name, buffer, url });
+            // Auto-load to Lane 1 if empty
+            if(!state.l1) inject(1, masterLibrary[masterLibrary.length-1]);
+            else if(!state.l2) inject(2, masterLibrary[masterLibrary.length-1]);
+        }
+    }
+
+    function inject(num, data) {
+        const clip = { ...data, offset: state.time };
+        if(num === 1) { state.l1 = clip; document.getElementById('v-out').src = clip.url; }
+        else { state.l2 = clip; }
+        drawClip(num, clip);
+    }
+
+    function drawClip(num, clip) {
+        const lane = document.getElementById(`lane-${num}`);
+        lane.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'clip';
+        div.style.width = (clip.buffer.duration * zoom) + "px";
+        div.style.left = (clip.offset * zoom) + "px";
+        
+        const canv = document.createElement('canvas');
+        paintWave(clip.buffer, canv);
+        div.appendChild(canv);
+
+        let startX = 0;
+        div.ontouchstart = (e) => { startX = e.touches[0].clientX - div.offsetLeft; };
+        div.ontouchmove = (e) => {
+            let x = e.touches[0].clientX - startX;
+            clip.offset = x / zoom;
+            div.style.left = x + "px";
+        };
+        lane.appendChild(div);
+    }
+
+    function paintWave(buf, canv) {
+        const ctx = canv.getContext('2d');
+        const d = buf.getChannelData(0);
+        canv.width = buf.duration * zoom; canv.height = 100;
+        ctx.fillStyle = '#ff3333';
+        const step = Math.ceil(d.length / canv.width);
+        for(let i=0; i<canv.width; i++) {
+            let min=1, max=-1;
+            for(let j=0; j<step; j++) { let v=d[i*step+j]; if(v<min)min=v; if(v>max)max=v; }
+            ctx.fillRect(i, (1+min)*50, 1, Math.max(1, (max-min)*50));
+        }
+    }
+
+    function manualScrub(e) {
+        const x = (e.touches[0].clientX) + document.getElementById('studio').scrollLeft;
+        state.time = x / zoom;
+        document.getElementById('playhead').style.left = x + "px";
+        document.getElementById('scrub-handle').style.left = x + "px";
+        document.getElementById('v-out').currentTime = state.time;
+    }
+
+    function playPause() {
+        if(state.playing) {
+            state.playing = false;
+            document.getElementById('v-out').pause();
+            [state.l1, state.l2].forEach(c => c?.src?.stop());
+            state.time += (actx.currentTime - state.start);
+        } else {
+            state.playing = true;
+            state.start = actx.currentTime;
+            document.getElementById('v-out').play();
+            [state.l1, state.l2].forEach(c => {
+                if(c) {
+                    c.src = actx.createBufferSource(); c.src.buffer = c.buffer;
+                    c.src.connect(actx.destination);
+                    let d = c.offset - state.time;
+                    d < 0 ? c.src.start(0, Math.abs(d)) : c.src.start(actx.currentTime + d);
+                }
+            });
+            requestAnimationFrame(run);
+        }
+    }
+
+    function run() {
+        if(!state.playing) return;
+        let now = (actx.currentTime - state.start) + state.time;
+        document.getElementById('playhead').style.left = (now * zoom) + "px";
+        document.getElementById('scrub-handle').style.left = (now * zoom) + "px";
+        if(now > window.innerWidth/zoom) document.getElementById('studio').scrollLeft = (now * zoom) - 100;
+        requestAnimationFrame(run);
+    }
+
+    async function slamNext() {
+        if(!state.l1 || !state.l2) return;
+        const dur = Math.max(state.l1.buffer.duration, state.l2.buffer.duration + state.l2.offset);
+        const octx = new OfflineAudioContext(2, 44100 * dur, 44100);
+        [state.l1, state.l2].forEach(c => {
+            const s = octx.createBufferSource(); s.buffer = c.buffer;
+            s.connect(octx.destination); s.start(c.offset || 0);
+        });
+        const res = await octx.startRendering();
+        state.l1 = { name: "COMPILED", buffer: res, offset: 0, url: state.l1.url };
+        state.l2 = null; document.getElementById('lane-2').innerHTML = '';
+        drawClip(1, state.l1);
+    }
+
+    function exportSong() {
+        if(!state.l1) return;
+        const link = document.createElement('a');
+        link.href = state.l1.url;
+        link.download = "X200_G35_Final.wav";
+        link.click();
+    }
+</script>
+</body>
+</html>
